@@ -163,7 +163,7 @@ fn play(input: &str) -> Result<Child, anyhow::Error> {
         .map_err(Into::into)
 }
 
-fn draw_ui(f: &mut Frame, inputs: &[File], input_idx: usize, bpm: Option<u32>) {
+fn draw_ui(f: &mut Frame, inputs: &[Box<dyn MusicFile>], input_idx: usize, bpm: Option<u32>) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
@@ -180,12 +180,12 @@ fn draw_ui(f: &mut Frame, inputs: &[File], input_idx: usize, bpm: Option<u32>) {
                 Style::default()
             };
 
-            let bpm_str = match input.bpm {
+            let bpm_str = match input.bpm() {
                 Some(bpm) => format!("{}", bpm),
                 None => "None".to_owned(),
             };
 
-            Row::new(vec![input.path.clone(), bpm_str]).style(style)
+            Row::new(vec![input.path().to_owned(), bpm_str]).style(style)
         })
         .collect::<Table>()
         .widths(&[Constraint::Percentage(90), Constraint::Percentage(10)])
@@ -207,15 +207,84 @@ fn draw_ui(f: &mut Frame, inputs: &[File], input_idx: usize, bpm: Option<u32>) {
     f.render_widget(bpm_part, chunks[1]);
 }
 
-enum FileType {
-    Mp3,
-    Flac,
+trait MusicFile {
+    fn path(&self) -> &str;
+    fn bpm(&self) -> Option<u32>;
+    fn set_bpm(&mut self, bpm: u32) -> Result<(), anyhow::Error>;
 }
 
-struct File {
+struct Mp3File {
     path: String,
     bpm: Option<u32>,
-    typ: FileType,
+}
+
+impl Mp3File {
+    fn new(path: String) -> Result<Mp3File, anyhow::Error> {
+        let tag = id3::Tag::read_from_path(&path)?;
+        let bpm = tag
+            .get("TBPM")
+            .and_then(|bpm| bpm.content().text())
+            .and_then(|bpm| bpm.parse().ok());
+
+        Ok(Mp3File { path, bpm })
+    }
+}
+
+impl MusicFile for Mp3File {
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn bpm(&self) -> Option<u32> {
+        self.bpm
+    }
+
+    fn set_bpm(&mut self, bpm: u32) -> Result<(), anyhow::Error> {
+        self.bpm = Some(bpm);
+        let mut tag = id3::Tag::read_from_path(&self.path).map_err(Into::<anyhow::Error>::into)?;
+        tag.set_text("TBPM", bpm.to_string());
+        tag.write_to_path(&self.path, id3::Version::Id3v24)
+            .map_err(Into::<anyhow::Error>::into)?;
+
+        Ok(())
+    }
+}
+
+struct FlacFile {
+    path: String,
+    bpm: Option<u32>,
+}
+
+impl FlacFile {
+    fn new(path: String) -> Result<FlacFile, anyhow::Error> {
+        let tag = metaflac::Tag::read_from_path(&path)?;
+        let bpm = tag
+            .get_vorbis("BPM")
+            .and_then(|mut bpm| bpm.next())
+            .and_then(|bpm| bpm.parse().ok());
+
+        Ok(FlacFile { path, bpm })
+    }
+}
+
+impl MusicFile for FlacFile {
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn bpm(&self) -> Option<u32> {
+        self.bpm
+    }
+
+    fn set_bpm(&mut self, bpm: u32) -> Result<(), anyhow::Error> {
+        self.bpm = Some(bpm);
+        let mut tag =
+            metaflac::Tag::read_from_path(&self.path).map_err(Into::<anyhow::Error>::into)?;
+        tag.set_vorbis("BPM", vec![bpm.to_string()]);
+        tag.save().map_err(Into::<anyhow::Error>::into)?;
+
+        Ok(())
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -223,33 +292,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut inputs = args
         .inputs
         .into_iter()
-        .map(|input| {
-            let typ = match Path::new(&input).extension().and_then(OsStr::to_str) {
-                Some("mp3") => FileType::Mp3,
-                Some("flac") => FileType::Flac,
+        .map(|input| -> Result<Box<dyn MusicFile>, anyhow::Error> {
+            let f = match Path::new(&input).extension().and_then(OsStr::to_str) {
+                Some("mp3") => Box::new(Mp3File::new(input)?) as Box<dyn MusicFile>,
+                Some("flac") => Box::new(FlacFile::new(input)?) as Box<dyn MusicFile>,
                 _ => return Err(anyhow::anyhow!("Unsupported file type")),
             };
 
-            let bpm = match typ {
-                FileType::Mp3 => {
-                    let tag = id3::Tag::read_from_path(&input)?;
-                    tag.get("TBPM")
-                        .and_then(|bpm| bpm.content().text())
-                        .and_then(|bpm| bpm.parse().ok())
-                }
-                FileType::Flac => {
-                    let tag = metaflac::Tag::read_from_path(&input)?;
-                    tag.get_vorbis("BPM")
-                        .and_then(|mut bpm| bpm.next())
-                        .and_then(|bpm| bpm.parse().ok())
-                }
-            };
-
-            Ok(File {
-                path: input,
-                bpm,
-                typ,
-            })
+            Ok(f)
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -259,7 +309,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut state = State::Playing {
         input_idx: 0,
-        player: play(&inputs[0].path)?,
+        player: play(&inputs[0].path())?,
         last_press_at: None,
         bpms: Bpms::new(),
     };
@@ -307,7 +357,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         player.kill()?;
                         state = State::Playing {
                             input_idx,
-                            player: play(&inputs[input_idx].path)?,
+                            player: play(&inputs[input_idx].path())?,
                             last_press_at: None,
                             bpms: Bpms::new(),
                         };
@@ -334,7 +384,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         player.kill()?;
                         state = State::Playing {
                             input_idx,
-                            player: play(&inputs[input_idx].path)?,
+                            player: play(&inputs[input_idx].path())?,
                             last_press_at: None,
                             bpms: Bpms::new(),
                         };
@@ -387,12 +437,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 match command {
                     ConfirmCommands::Yes => {
-                        inputs[input_idx].bpm = Some(bpm);
-                        save_tag(&inputs[input_idx], bpm)?;
+                        inputs[input_idx].set_bpm(bpm)?;
                         let input_idx = (input_idx + 1) % inputs.len();
                         state = State::Playing {
                             input_idx,
-                            player: play(&inputs[input_idx].path)?,
+                            player: play(&inputs[input_idx].path())?,
                             last_press_at: None,
                             bpms: Bpms::new(),
                         };
@@ -400,7 +449,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ConfirmCommands::No => {
                         state = State::Playing {
                             input_idx,
-                            player: play(&inputs[input_idx].path)?,
+                            player: play(&inputs[input_idx].path())?,
                             last_press_at: None,
                             bpms: Bpms::new(),
                         };
@@ -410,24 +459,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    Ok(())
-}
-
-fn save_tag(file: &File, bpm: u32) -> Result<(), anyhow::Error> {
-    match file.typ {
-        FileType::Mp3 => {
-            let mut tag =
-                id3::Tag::read_from_path(&file.path).map_err(Into::<anyhow::Error>::into)?;
-            tag.set_text("TBPM", bpm.to_string());
-            tag.write_to_path(&file.path, id3::Version::Id3v24)
-                .map_err(Into::<anyhow::Error>::into)?;
-        }
-        FileType::Flac => {
-            let mut tag =
-                metaflac::Tag::read_from_path(&file.path).map_err(Into::<anyhow::Error>::into)?;
-            tag.set_vorbis("BPM", vec![bpm.to_string()]);
-            tag.save().map_err(Into::<anyhow::Error>::into)?;
-        }
-    }
     Ok(())
 }

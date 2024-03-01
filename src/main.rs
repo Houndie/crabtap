@@ -16,7 +16,7 @@ use ratatui::{
 use std::{
     collections::{hash_map, HashMap},
     ffi::OsStr,
-    fs, io,
+    io,
     path::Path,
     process::{Child, Command, Stdio},
 };
@@ -24,15 +24,6 @@ use std::{
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    #[arg(short, long)]
-    output_directory: Option<String>,
-
-    #[arg(long)]
-    inplace: bool,
-
-    #[arg(short, long)]
-    filter_existing: bool,
-
     inputs: Vec<String>,
 }
 
@@ -161,11 +152,6 @@ impl Bpms {
     }
 }
 
-enum Output {
-    ToDirectory(String),
-    InPlace,
-}
-
 fn play(input: &str) -> Result<Child, anyhow::Error> {
     Command::new("mpv")
         .arg(input)
@@ -177,7 +163,7 @@ fn play(input: &str) -> Result<Child, anyhow::Error> {
         .map_err(Into::into)
 }
 
-fn draw_ui<S: AsRef<str>>(f: &mut Frame, inputs: &[S], input_idx: usize, bpm: Option<u32>) {
+fn draw_ui(f: &mut Frame, inputs: &[File], input_idx: usize, bpm: Option<u32>) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
@@ -185,7 +171,7 @@ fn draw_ui<S: AsRef<str>>(f: &mut Frame, inputs: &[S], input_idx: usize, bpm: Op
         .split(f.size());
 
     let input_table = inputs
-        .iter()
+        .into_iter()
         .enumerate()
         .map(|(idx, input)| {
             let style = if idx == input_idx {
@@ -194,9 +180,15 @@ fn draw_ui<S: AsRef<str>>(f: &mut Frame, inputs: &[S], input_idx: usize, bpm: Op
                 Style::default()
             };
 
-            Row::new(vec![input.as_ref().to_owned()]).style(style)
+            let bpm_str = match input.bpm {
+                Some(bpm) => format!("{}", bpm),
+                None => "None".to_owned(),
+            };
+
+            Row::new(vec![input.path.clone(), bpm_str]).style(style)
         })
         .collect::<Table>()
+        .widths(&[Constraint::Percentage(90), Constraint::Percentage(10)])
         .block(Block::default().borders(Borders::ALL));
 
     f.render_widget(input_table, chunks[0]);
@@ -215,66 +207,51 @@ fn draw_ui<S: AsRef<str>>(f: &mut Frame, inputs: &[S], input_idx: usize, bpm: Op
     f.render_widget(bpm_part, chunks[1]);
 }
 
+enum FileType {
+    Mp3,
+    Flac,
+}
+
+struct File {
+    path: String,
+    bpm: Option<u32>,
+    typ: FileType,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    let mut inputs = args
+        .inputs
+        .into_iter()
+        .map(|input| {
+            let typ = match Path::new(&input).extension().and_then(OsStr::to_str) {
+                Some("mp3") => FileType::Mp3,
+                Some("flac") => FileType::Flac,
+                _ => return Err(anyhow::anyhow!("Unsupported file type")),
+            };
 
-    let output = match (args.output_directory, args.inplace) {
-        (Some(dir), false) => Output::ToDirectory(dir),
-        (None, true) => Output::InPlace,
-        (Some(_), true) => {
-            return Err(anyhow::anyhow!("Cannot use both --output-directory and --inplace").into())
-        }
-        (None, false) => {
-            return Err(anyhow::anyhow!("Must use either --output-directory or --inplace").into())
-        }
-    };
+            let bpm = match typ {
+                FileType::Mp3 => {
+                    let tag = id3::Tag::read_from_path(&input)?;
+                    tag.get("TBPM")
+                        .and_then(|bpm| bpm.content().text())
+                        .and_then(|bpm| bpm.parse().ok())
+                }
+                FileType::Flac => {
+                    let tag = metaflac::Tag::read_from_path(&input)?;
+                    tag.get_vorbis("BPM")
+                        .and_then(|mut bpm| bpm.next())
+                        .and_then(|bpm| bpm.parse().ok())
+                }
+            };
 
-    let inputs = if args.filter_existing {
-        let args_and_filters = args
-            .inputs
-            .into_iter()
-            .map(
-                |input| match Path::new(&input).extension().and_then(OsStr::to_str) {
-                    Some("mp3") => {
-                        let tag = match id3::Tag::read_from_path(&input) {
-                            Ok(tag) => tag,
-                            Err(id3::Error {
-                                kind: id3::ErrorKind::NoTag,
-                                ..
-                            }) => return Ok((input, true)),
-                            Err(e) => return Err(e.into()),
-                        };
-
-                        let bpm = tag
-                            .frames()
-                            .find(|frame| frame.id() == "TBPM")
-                            .and_then(|frame| frame.content().text());
-
-                        Ok((input, bpm.is_none()))
-                    }
-                    Some("flac") => {
-                        let tag = match metaflac::Tag::read_from_path(&input) {
-                            Ok(tag) => tag,
-                            Err(e) => return Err(e.into()),
-                        };
-
-                        let bpms = tag.vorbis_comments().and_then(|comment| comment.get("BPM"));
-
-                        Ok((input, bpms.is_none()))
-                    }
-                    _ => Err(anyhow::anyhow!("Unsupported file type for file: {}", input)),
-                },
-            )
-            .collect::<Result<Vec<(String, bool)>, anyhow::Error>>()?;
-
-        args_and_filters
-            .into_iter()
-            .filter(|(_, f)| *f)
-            .map(|(i, _)| i)
-            .collect()
-    } else {
-        args.inputs
-    };
+            Ok(File {
+                path: input,
+                bpm,
+                typ,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     if inputs.len() == 0 {
         return Ok(());
@@ -282,7 +259,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut state = State::Playing {
         input_idx: 0,
-        player: play(&inputs[0])?,
+        player: play(&inputs[0].path)?,
         last_press_at: None,
         bpms: Bpms::new(),
     };
@@ -330,7 +307,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         player.kill()?;
                         state = State::Playing {
                             input_idx,
-                            player: play(&inputs[input_idx])?,
+                            player: play(&inputs[input_idx].path)?,
                             last_press_at: None,
                             bpms: Bpms::new(),
                         };
@@ -357,7 +334,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         player.kill()?;
                         state = State::Playing {
                             input_idx,
-                            player: play(&inputs[input_idx])?,
+                            player: play(&inputs[input_idx].path)?,
                             last_press_at: None,
                             bpms: Bpms::new(),
                         };
@@ -410,31 +387,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 match command {
                     ConfirmCommands::Yes => {
-                        match output {
-                            Output::ToDirectory(ref dir) => {
-                                let new_path = Path::new(&dir)
-                                    .join(Path::new(&inputs[input_idx]).file_name().unwrap());
-                                fs::copy(&inputs[input_idx], &new_path)?;
-                                save_tag(new_path.to_str().unwrap(), bpm)?;
-                            }
-                            Output::InPlace => {
-                                save_tag(&inputs[input_idx], bpm)?;
-                            }
-                        }
+                        inputs[input_idx].bpm = Some(bpm);
+                        save_tag(&inputs[input_idx], bpm)?;
                         let input_idx = (input_idx + 1) % inputs.len();
                         state = State::Playing {
                             input_idx,
-                            player: play(&inputs[input_idx])?,
+                            player: play(&inputs[input_idx].path)?,
                             last_press_at: None,
-                            bpms: Vec::new(),
+                            bpms: Bpms::new(),
                         };
                     }
                     ConfirmCommands::No => {
                         state = State::Playing {
                             input_idx,
-                            player: play(&inputs[input_idx])?,
+                            player: play(&inputs[input_idx].path)?,
                             last_press_at: None,
-                            bpms: Vec::new(),
+                            bpms: Bpms::new(),
                         };
                     }
                 }
@@ -445,19 +413,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn save_tag(filename: &str, bpm: u32) -> Result<(), Box<dyn std::error::Error>> {
-    match Path::new(&filename).extension().and_then(OsStr::to_str) {
-        Some("mp3") => {
-            let mut tag = id3::Tag::read_from_path(&filename)?;
+fn save_tag(file: &File, bpm: u32) -> Result<(), anyhow::Error> {
+    match file.typ {
+        FileType::Mp3 => {
+            let mut tag =
+                id3::Tag::read_from_path(&file.path).map_err(Into::<anyhow::Error>::into)?;
             tag.set_text("TBPM", bpm.to_string());
-            tag.write_to_path(&filename, id3::Version::Id3v24)?;
+            tag.write_to_path(&file.path, id3::Version::Id3v24)
+                .map_err(Into::<anyhow::Error>::into)?;
         }
-        Some("flac") => {
-            let mut tag = metaflac::Tag::read_from_path(&filename)?;
+        FileType::Flac => {
+            let mut tag =
+                metaflac::Tag::read_from_path(&file.path).map_err(Into::<anyhow::Error>::into)?;
             tag.set_vorbis("BPM", vec![bpm.to_string()]);
-            tag.save()?;
+            tag.save().map_err(Into::<anyhow::Error>::into)?;
         }
-        _ => return Err(anyhow::anyhow!("Unsupported file type").into()),
     }
     Ok(())
 }

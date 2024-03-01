@@ -14,3 +14,11 @@ id3 = "1.13.1"
 metaflac = "0.2.5"
 ratatui = "0.26.1"
 rodio = "0.17.3"
+
+[[bin]]
+name = "crabtap"
+path = "src/main.rs"
+
+[[bin]]
+name = "crabtapfilter"
+path = "src/filter.rs"

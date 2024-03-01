@@ -4,7 +4,6 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen},
 };
-use id3::TagLike;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -21,6 +20,8 @@ use std::{
     io::{self, BufReader},
     path::Path,
 };
+
+mod file;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -156,7 +157,7 @@ fn play(input: &str, handle: &OutputStreamHandle) -> Result<Sink, anyhow::Error>
 
 fn draw_ui(
     f: &mut Frame,
-    inputs: &[Box<dyn MusicFile>],
+    inputs: &[Box<dyn file::Music>],
     table_state: &mut TableState,
     bpm: Option<u32>,
 ) {
@@ -197,105 +198,16 @@ fn draw_ui(
     f.render_widget(bpm_part, chunks[1]);
 }
 
-trait MusicFile {
-    fn path(&self) -> &str;
-    fn bpm(&self) -> Option<u32>;
-    fn set_bpm(&mut self, bpm: u32) -> Result<(), anyhow::Error>;
-}
-
-struct Mp3File {
-    path: String,
-    bpm: Option<u32>,
-}
-
-impl Mp3File {
-    fn new(path: String) -> Result<Mp3File, anyhow::Error> {
-        let tag = match id3::Tag::read_from_path(&path) {
-            Ok(tag) => Some(tag),
-            Err(id3::Error {
-                kind: id3::ErrorKind::NoTag,
-                ..
-            }) => None,
-            Err(e) => return Err(e.into()),
-        };
-
-        let bpm = tag
-            .as_ref()
-            .and_then(|tag| tag.get("TBPM"))
-            .and_then(|bpm| bpm.content().text())
-            .and_then(|bpm| bpm.parse().ok());
-
-        Ok(Mp3File { path, bpm })
-    }
-}
-
-impl MusicFile for Mp3File {
-    fn path(&self) -> &str {
-        &self.path
-    }
-
-    fn bpm(&self) -> Option<u32> {
-        self.bpm
-    }
-
-    fn set_bpm(&mut self, bpm: u32) -> Result<(), anyhow::Error> {
-        self.bpm = Some(bpm);
-        let mut tag = id3::Tag::read_from_path(&self.path).map_err(Into::<anyhow::Error>::into)?;
-        tag.set_text("TBPM", bpm.to_string());
-        tag.write_to_path(&self.path, id3::Version::Id3v24)
-            .map_err(Into::<anyhow::Error>::into)?;
-
-        Ok(())
-    }
-}
-
-struct FlacFile {
-    path: String,
-    bpm: Option<u32>,
-}
-
-impl FlacFile {
-    fn new(path: String) -> Result<FlacFile, anyhow::Error> {
-        let tag = metaflac::Tag::read_from_path(&path)?;
-        let bpm = tag
-            .get_vorbis("BPM")
-            .and_then(|mut bpm| bpm.next())
-            .and_then(|bpm| bpm.parse().ok());
-
-        Ok(FlacFile { path, bpm })
-    }
-}
-
-impl MusicFile for FlacFile {
-    fn path(&self) -> &str {
-        &self.path
-    }
-
-    fn bpm(&self) -> Option<u32> {
-        self.bpm
-    }
-
-    fn set_bpm(&mut self, bpm: u32) -> Result<(), anyhow::Error> {
-        self.bpm = Some(bpm);
-        let mut tag =
-            metaflac::Tag::read_from_path(&self.path).map_err(Into::<anyhow::Error>::into)?;
-        tag.set_vorbis("BPM", vec![bpm.to_string()]);
-        tag.save().map_err(Into::<anyhow::Error>::into)?;
-
-        Ok(())
-    }
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (_stream, stream_handle) = OutputStream::try_default()?;
     let args = Args::parse();
     let mut inputs = args
         .inputs
         .into_iter()
-        .map(|input| -> Result<Box<dyn MusicFile>, anyhow::Error> {
+        .map(|input| -> Result<Box<dyn file::Music>, anyhow::Error> {
             let f = match Path::new(&input).extension().and_then(OsStr::to_str) {
-                Some("mp3") => Box::new(Mp3File::new(input)?) as Box<dyn MusicFile>,
-                Some("flac") => Box::new(FlacFile::new(input)?) as Box<dyn MusicFile>,
+                Some("mp3") => Box::new(file::Mp3::new(input)?) as Box<dyn file::Music>,
+                Some("flac") => Box::new(file::Flac::new(input)?) as Box<dyn file::Music>,
                 _ => return Err(anyhow::anyhow!("Unsupported file type")),
             };
 

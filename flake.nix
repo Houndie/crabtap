@@ -16,6 +16,12 @@
   in
   {
     devShell.${system} = pkgs.mkShell {
+      nativeBuildInputs = with pkgs; [
+	pkg-config
+      ];
+      buildInputs = with pkgs; [
+        alsa-lib
+      ];
       packages = with pkgs; [
         pkgs.rust-bin.stable.latest.default
       ];

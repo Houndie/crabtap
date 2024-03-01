@@ -13,12 +13,13 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Row, Table},
     CompletedFrame, Frame, Terminal,
 };
+use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
 use std::{
     collections::{hash_map, HashMap},
     ffi::OsStr,
-    io,
+    fs::File,
+    io::{self, BufReader},
     path::Path,
-    process::{Child, Command, Stdio},
 };
 
 #[derive(Parser, Debug)]
@@ -30,7 +31,7 @@ struct Args {
 enum State {
     Playing {
         input_idx: usize,
-        player: std::process::Child,
+        player: Sink,
         last_press_at: Option<chrono::DateTime<chrono::Utc>>,
         bpms: Bpms,
     },
@@ -46,6 +47,8 @@ enum PlayCommands {
     Confirm,
     Restart,
     Tap,
+    Up,
+    Down,
 }
 
 enum ConfirmCommands {
@@ -152,15 +155,12 @@ impl Bpms {
     }
 }
 
-fn play(input: &str) -> Result<Child, anyhow::Error> {
-    Command::new("mpv")
-        .arg(input)
-        .arg("--no-video")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(Into::into)
+fn play(input: &str, handle: &OutputStreamHandle) -> Result<Sink, anyhow::Error> {
+    let sink = Sink::try_new(handle)?;
+    let source = Decoder::new_looped(BufReader::new(File::open(input)?))?;
+    sink.append(source);
+    sink.play();
+    Ok(sink)
 }
 
 fn draw_ui(f: &mut Frame, inputs: &[Box<dyn MusicFile>], input_idx: usize, bpm: Option<u32>) {
@@ -220,9 +220,18 @@ struct Mp3File {
 
 impl Mp3File {
     fn new(path: String) -> Result<Mp3File, anyhow::Error> {
-        let tag = id3::Tag::read_from_path(&path)?;
+        let tag = match id3::Tag::read_from_path(&path) {
+            Ok(tag) => Some(tag),
+            Err(id3::Error {
+                kind: id3::ErrorKind::NoTag,
+                ..
+            }) => None,
+            Err(e) => return Err(e.into()),
+        };
+
         let bpm = tag
-            .get("TBPM")
+            .as_ref()
+            .and_then(|tag| tag.get("TBPM"))
             .and_then(|bpm| bpm.content().text())
             .and_then(|bpm| bpm.parse().ok());
 
@@ -288,6 +297,7 @@ impl MusicFile for FlacFile {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (_stream, stream_handle) = OutputStream::try_default()?;
     let args = Args::parse();
     let mut inputs = args
         .inputs
@@ -309,7 +319,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut state = State::Playing {
         input_idx: 0,
-        player: play(&inputs[0].path())?,
+        player: play(&inputs[0].path(), &stream_handle)?,
         last_press_at: None,
         bpms: Bpms::new(),
     };
@@ -320,7 +330,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match state {
             State::Playing {
                 input_idx,
-                mut player,
+                player,
                 last_press_at,
                 mut bpms,
             } => {
@@ -338,6 +348,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         PlayCommands::Quit,
                     ),
                     (
+                        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()),
+                        PlayCommands::Quit,
+                    ),
+                    (
                         KeyEvent::new(KeyCode::Char('s'), KeyModifiers::empty()),
                         PlayCommands::Skip,
                     ),
@@ -349,26 +363,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
                         PlayCommands::Confirm,
                     ),
+                    (
+                        KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
+                        PlayCommands::Up,
+                    ),
+                    (
+                        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()),
+                        PlayCommands::Up,
+                    ),
+                    (
+                        KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+                        PlayCommands::Down,
+                    ),
+                    (
+                        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()),
+                        PlayCommands::Down,
+                    ),
                 ])?;
 
                 match command {
                     PlayCommands::Skip => {
                         let input_idx = (input_idx + 1) % inputs.len();
-                        player.kill()?;
                         state = State::Playing {
                             input_idx,
-                            player: play(&inputs[input_idx].path())?,
+                            player: play(&inputs[input_idx].path(), &stream_handle)?,
                             last_press_at: None,
                             bpms: Bpms::new(),
                         };
                     }
                     PlayCommands::Quit => {
-                        player.kill()?;
                         break;
                     }
                     PlayCommands::Confirm => match bpms.avg() {
                         Some(bpm) => {
-                            player.kill()?;
                             state = State::Finished { input_idx, bpm };
                         }
                         None => {
@@ -381,10 +408,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     },
                     PlayCommands::Restart => {
-                        player.kill()?;
                         state = State::Playing {
                             input_idx,
-                            player: play(&inputs[input_idx].path())?,
+                            player: play(&inputs[input_idx].path(), &stream_handle)?,
                             last_press_at: None,
                             bpms: Bpms::new(),
                         };
@@ -402,6 +428,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             last_press_at: Some(now),
                             bpms,
                         }
+                    }
+                    PlayCommands::Up => {
+                        if inputs.len() == 1 {
+                            state = State::Playing {
+                                input_idx,
+                                player,
+                                last_press_at,
+                                bpms,
+                            };
+                            continue;
+                        }
+
+                        let input_idx = (input_idx + inputs.len() - 1) % inputs.len();
+                        state = State::Playing {
+                            input_idx,
+                            player: play(&inputs[input_idx].path(), &stream_handle)?,
+                            last_press_at: None,
+                            bpms: Bpms::new(),
+                        };
+                    }
+                    PlayCommands::Down => {
+                        if inputs.len() == 1 {
+                            state = State::Playing {
+                                input_idx,
+                                player,
+                                last_press_at,
+                                bpms,
+                            };
+                            continue;
+                        }
+
+                        let input_idx = (input_idx + 1) % inputs.len();
+                        state = State::Playing {
+                            input_idx,
+                            player: play(&inputs[input_idx].path(), &stream_handle)?,
+                            last_press_at: None,
+                            bpms: Bpms::new(),
+                        };
                     }
                 }
             }
@@ -441,7 +505,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let input_idx = (input_idx + 1) % inputs.len();
                         state = State::Playing {
                             input_idx,
-                            player: play(&inputs[input_idx].path())?,
+                            player: play(&inputs[input_idx].path(), &stream_handle)?,
                             last_press_at: None,
                             bpms: Bpms::new(),
                         };
@@ -449,7 +513,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ConfirmCommands::No => {
                         state = State::Playing {
                             input_idx,
-                            player: play(&inputs[input_idx].path())?,
+                            player: play(&inputs[input_idx].path(), &stream_handle)?,
                             last_press_at: None,
                             bpms: Bpms::new(),
                         };

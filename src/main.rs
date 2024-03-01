@@ -8,9 +8,9 @@ use id3::TagLike;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Row, Table},
+    widgets::{Block, Borders, Clear, Paragraph, Row, Table, TableState},
     CompletedFrame, Frame, Terminal,
 };
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
@@ -29,20 +29,11 @@ struct Args {
 }
 
 enum State {
-    Playing {
-        input_idx: usize,
-        player: Sink,
-        last_press_at: Option<chrono::DateTime<chrono::Utc>>,
-        bpms: Bpms,
-    },
-    Finished {
-        input_idx: usize,
-        bpm: u32,
-    },
+    Playing,
+    Finished { bpm: u32 },
 }
 
 enum PlayCommands {
-    Skip,
     Quit,
     Confirm,
     Restart,
@@ -163,7 +154,12 @@ fn play(input: &str, handle: &OutputStreamHandle) -> Result<Sink, anyhow::Error>
     Ok(sink)
 }
 
-fn draw_ui(f: &mut Frame, inputs: &[Box<dyn MusicFile>], input_idx: usize, bpm: Option<u32>) {
+fn draw_ui(
+    f: &mut Frame,
+    inputs: &[Box<dyn MusicFile>],
+    table_state: &mut TableState,
+    bpm: Option<u32>,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
@@ -172,26 +168,20 @@ fn draw_ui(f: &mut Frame, inputs: &[Box<dyn MusicFile>], input_idx: usize, bpm: 
 
     let input_table = inputs
         .into_iter()
-        .enumerate()
-        .map(|(idx, input)| {
-            let style = if idx == input_idx {
-                Style::default().fg(Color::Black).bg(Color::White)
-            } else {
-                Style::default()
-            };
-
+        .map(|input| {
             let bpm_str = match input.bpm() {
                 Some(bpm) => format!("{}", bpm),
                 None => "None".to_owned(),
             };
 
-            Row::new(vec![input.path().to_owned(), bpm_str]).style(style)
+            Row::new(vec![input.path().to_owned(), bpm_str])
         })
         .collect::<Table>()
         .widths(&[Constraint::Percentage(90), Constraint::Percentage(10)])
-        .block(Block::default().borders(Borders::ALL));
+        .block(Block::default().borders(Borders::ALL))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
-    f.render_widget(input_table, chunks[0]);
+    f.render_stateful_widget(input_table, chunks[0], table_state);
 
     let bpm_part = Paragraph::new(vec![Line::from(match bpm {
         Some(bpm) => format!("BPM: {}", bpm),
@@ -316,26 +306,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if inputs.len() == 0 {
         return Ok(());
     }
+    let mut table_state = TableState::default();
+    table_state.select(Some(0));
+    let mut _player = play(&inputs[0].path(), &stream_handle)?;
+    let mut last_press_at = None;
+    let mut bpms = Bpms::new();
 
-    let mut state = State::Playing {
-        input_idx: 0,
-        player: play(&inputs[0].path(), &stream_handle)?,
-        last_press_at: None,
-        bpms: Bpms::new(),
-    };
+    let mut state = State::Playing;
 
     let mut terminal = RAIITerminal::new()?;
 
     loop {
         match state {
-            State::Playing {
-                input_idx,
-                player,
-                last_press_at,
-                mut bpms,
-            } => {
+            State::Playing => {
                 terminal.draw(|f| {
-                    draw_ui(f, &inputs, input_idx, bpms.avg());
+                    draw_ui(f, &inputs, &mut table_state, bpms.avg());
                 })?;
 
                 let command = on_keypress([
@@ -350,10 +335,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (
                         KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()),
                         PlayCommands::Quit,
-                    ),
-                    (
-                        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::empty()),
-                        PlayCommands::Skip,
                     ),
                     (
                         KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()),
@@ -382,38 +363,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ])?;
 
                 match command {
-                    PlayCommands::Skip => {
-                        let input_idx = (input_idx + 1) % inputs.len();
-                        state = State::Playing {
-                            input_idx,
-                            player: play(&inputs[input_idx].path(), &stream_handle)?,
-                            last_press_at: None,
-                            bpms: Bpms::new(),
-                        };
-                    }
                     PlayCommands::Quit => {
                         break;
                     }
                     PlayCommands::Confirm => match bpms.avg() {
                         Some(bpm) => {
-                            state = State::Finished { input_idx, bpm };
+                            state = State::Finished { bpm };
                         }
-                        None => {
-                            state = State::Playing {
-                                input_idx,
-                                player,
-                                last_press_at,
-                                bpms,
-                            }
-                        }
+                        None => {}
                     },
                     PlayCommands::Restart => {
-                        state = State::Playing {
-                            input_idx,
-                            player: play(&inputs[input_idx].path(), &stream_handle)?,
-                            last_press_at: None,
-                            bpms: Bpms::new(),
-                        };
+                        _player = play(
+                            &inputs[table_state.selected().unwrap()].path(),
+                            &stream_handle,
+                        )?;
+                        last_press_at = None;
+                        bpms = Bpms::new();
                     }
                     PlayCommands::Tap => {
                         let now = chrono::Utc::now();
@@ -422,56 +387,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let bpm = 60000.0 / (diff.num_milliseconds() as f64);
                             bpms.push(bpm);
                         }
-                        state = State::Playing {
-                            input_idx,
-                            player,
-                            last_press_at: Some(now),
-                            bpms,
-                        }
+                        last_press_at = Some(now);
                     }
                     PlayCommands::Up => {
                         if inputs.len() == 1 {
-                            state = State::Playing {
-                                input_idx,
-                                player,
-                                last_press_at,
-                                bpms,
-                            };
                             continue;
                         }
 
-                        let input_idx = (input_idx + inputs.len() - 1) % inputs.len();
-                        state = State::Playing {
-                            input_idx,
-                            player: play(&inputs[input_idx].path(), &stream_handle)?,
-                            last_press_at: None,
-                            bpms: Bpms::new(),
-                        };
+                        let input_idx =
+                            (table_state.selected().unwrap() + inputs.len() - 1) % inputs.len();
+                        table_state.select(Some(input_idx));
+                        _player = play(&inputs[input_idx].path(), &stream_handle)?;
+                        last_press_at = None;
+                        bpms = Bpms::new();
                     }
                     PlayCommands::Down => {
                         if inputs.len() == 1 {
-                            state = State::Playing {
-                                input_idx,
-                                player,
-                                last_press_at,
-                                bpms,
-                            };
                             continue;
                         }
 
-                        let input_idx = (input_idx + 1) % inputs.len();
-                        state = State::Playing {
-                            input_idx,
-                            player: play(&inputs[input_idx].path(), &stream_handle)?,
-                            last_press_at: None,
-                            bpms: Bpms::new(),
-                        };
+                        let input_idx = (table_state.selected().unwrap() + 1) % inputs.len();
+                        table_state.select(Some(input_idx));
+                        _player = play(&inputs[input_idx].path(), &stream_handle)?;
+                        last_press_at = None;
+                        bpms = Bpms::new();
                     }
                 }
             }
-            State::Finished { input_idx, bpm } => {
+            State::Finished { bpm } => {
                 terminal.draw(|f| {
-                    draw_ui(f, &inputs, input_idx, Some(bpm));
+                    draw_ui(f, &inputs, &mut table_state, Some(bpm));
                     let popup = Paragraph::new(vec![
                         Line::from("Save BPM?"),
                         Line::from(vec![
@@ -501,22 +446,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 match command {
                     ConfirmCommands::Yes => {
-                        inputs[input_idx].set_bpm(bpm)?;
-                        let input_idx = (input_idx + 1) % inputs.len();
-                        state = State::Playing {
-                            input_idx,
-                            player: play(&inputs[input_idx].path(), &stream_handle)?,
-                            last_press_at: None,
-                            bpms: Bpms::new(),
-                        };
+                        inputs[table_state.selected().unwrap()].set_bpm(bpm)?;
+                        let input_idx = (table_state.selected().unwrap() + 1) % inputs.len();
+                        state = State::Playing;
+                        table_state.select(Some(input_idx));
+                        _player = play(&inputs[input_idx].path(), &stream_handle)?;
+                        last_press_at = None;
+                        bpms = Bpms::new();
                     }
                     ConfirmCommands::No => {
-                        state = State::Playing {
-                            input_idx,
-                            player: play(&inputs[input_idx].path(), &stream_handle)?,
-                            last_press_at: None,
-                            bpms: Bpms::new(),
-                        };
+                        state = State::Playing;
                     }
                 }
             }

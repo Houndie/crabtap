@@ -11,7 +11,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Row, Table},
-    Frame, Terminal,
+    CompletedFrame, Frame, Terminal,
 };
 use std::{
     collections::{hash_map, HashMap},
@@ -60,6 +60,41 @@ enum PlayCommands {
 enum ConfirmCommands {
     Yes,
     No,
+}
+
+struct RAIITerminal {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+}
+
+impl RAIITerminal {
+    fn new() -> Result<RAIITerminal, anyhow::Error> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        Ok(RAIITerminal {
+            terminal: Terminal::new(backend)?,
+        })
+    }
+
+    fn draw<F>(&mut self, f: F) -> io::Result<CompletedFrame>
+    where
+        F: FnOnce(&mut Frame),
+    {
+        self.terminal.draw(f)
+    }
+}
+
+impl Drop for RAIITerminal {
+    fn drop(&mut self) {
+        disable_raw_mode().unwrap();
+        execute!(
+            self.terminal.backend_mut(),
+            crossterm::terminal::LeaveAlternateScreen
+        )
+        .unwrap();
+        self.terminal.show_cursor().unwrap();
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -224,11 +259,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bpms: Vec::new(),
     };
 
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = RAIITerminal::new()?;
 
     loop {
         match state {
@@ -265,7 +296,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         PlayCommands::Restart,
                     ),
                     (
-                        KeyEvent::new(KeyCode::Char('\n'), KeyModifiers::empty()),
+                        KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
                         PlayCommands::Confirm,
                     ),
                 ])?;
@@ -383,13 +414,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        crossterm::terminal::LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
 
     Ok(())
 }

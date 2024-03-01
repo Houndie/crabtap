@@ -1,5 +1,6 @@
 use clap::Parser;
 use crossterm::{
+    event::{Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen},
 };
@@ -19,7 +20,6 @@ use std::{
     path::Path,
     process::{Child, Command, Stdio},
 };
-use termion::{event::Key, input::TermRead};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -79,18 +79,19 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 fn on_keypress<Command>(
-    iter: impl IntoIterator<Item = (Key, Command)>,
+    iter: impl IntoIterator<Item = (KeyEvent, Command)>,
 ) -> Result<Command, anyhow::Error> {
-    let mut commands = iter.into_iter().collect::<HashMap<Key, Command>>();
-    for key in io::stdin().keys() {
-        let key = key?;
+    let mut commands = iter
+        .into_iter()
+        .map(|(k, v)| (Event::Key(k), v))
+        .collect::<HashMap<Event, Command>>();
+    loop {
+        let key = crossterm::event::read()?;
 
         if let hash_map::Entry::Occupied(entry) = commands.entry(key) {
             return Ok(entry.remove());
         }
     }
-
-    Err(anyhow::anyhow!("No keypress found"))
 }
 
 fn avg_bpm(bpms: &[f64]) -> u32 {
@@ -247,11 +248,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })?;
 
                 let command = on_keypress([
-                    (Key::Char(' '), PlayCommands::Tap),
-                    (Key::Esc, PlayCommands::Quit),
-                    (Key::Char('s'), PlayCommands::Skip),
-                    (Key::Char('r'), PlayCommands::Restart),
-                    (Key::Char('\n'), PlayCommands::Confirm),
+                    (
+                        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()),
+                        PlayCommands::Tap,
+                    ),
+                    (
+                        KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+                        PlayCommands::Quit,
+                    ),
+                    (
+                        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::empty()),
+                        PlayCommands::Skip,
+                    ),
+                    (
+                        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()),
+                        PlayCommands::Restart,
+                    ),
+                    (
+                        KeyEvent::new(KeyCode::Char('\n'), KeyModifiers::empty()),
+                        PlayCommands::Confirm,
+                    ),
                 ])?;
 
                 match command {
@@ -324,8 +340,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })?;
 
                 let command = on_keypress([
-                    (Key::Char('y'), ConfirmCommands::Yes),
-                    (Key::Char('n'), ConfirmCommands::No),
+                    (
+                        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()),
+                        ConfirmCommands::Yes,
+                    ),
+                    (
+                        KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()),
+                        ConfirmCommands::No,
+                    ),
                 ])?;
 
                 match command {

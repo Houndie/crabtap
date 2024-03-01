@@ -1,11 +1,25 @@
 use clap::Parser;
+use crossterm::{
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen},
+};
 use id3::TagLike;
-use std::collections::{hash_map, HashMap};
-use std::fs;
-use std::io::{self, Write};
-use std::process::{Child, Stdio};
-use std::{ffi::OsStr, path::Path, process::Command};
-use termion::{event::Key, input::TermRead, raw::IntoRawMode};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, Paragraph, Row, Table},
+    Frame, Terminal,
+};
+use std::{
+    collections::{hash_map, HashMap},
+    ffi::OsStr,
+    fs, io,
+    path::Path,
+    process::{Child, Command, Stdio},
+};
+use termion::{event::Key, input::TermRead};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -48,6 +62,22 @@ enum ConfirmCommands {
     No,
 }
 
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .split(r);
+
+    Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .split(popup_layout[1])[1]
+}
+
 fn on_keypress<Command>(
     iter: impl IntoIterator<Item = (Key, Command)>,
 ) -> Result<Command, anyhow::Error> {
@@ -81,6 +111,44 @@ fn play(input: &str) -> Result<Child, anyhow::Error> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(Into::into)
+}
+
+fn draw_ui<S: AsRef<str>>(f: &mut Frame, inputs: &[S], input_idx: usize, bpm: Option<u32>) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([Constraint::Percentage(90), Constraint::Percentage(10)].as_ref())
+        .split(f.size());
+
+    let input_table = inputs
+        .iter()
+        .enumerate()
+        .map(|(idx, input)| {
+            let style = if idx == input_idx {
+                Style::default().fg(Color::Black).bg(Color::White)
+            } else {
+                Style::default()
+            };
+
+            Row::new(vec![input.as_ref().to_owned()]).style(style)
+        })
+        .collect::<Table>()
+        .block(Block::default().borders(Borders::ALL));
+
+    f.render_widget(input_table, chunks[0]);
+
+    let bpm_part = Paragraph::new(vec![Line::from(match bpm {
+        Some(bpm) => format!("BPM: {}", bpm),
+        None => String::new(),
+    })])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Tap Space for BPM!")
+            .title_alignment(Alignment::Center),
+    );
+
+    f.render_widget(bpm_part, chunks[1]);
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -155,8 +223,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bpms: Vec::new(),
     };
 
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
     loop {
-        let mut stdout = io::stdout().into_raw_mode()?;
         match state {
             State::Playing {
                 input_idx,
@@ -164,25 +237,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 last_press_at,
                 mut bpms,
             } => {
-                let bpm_part = if bpms.len() > 0 {
-                    format!("{}BPM: {}", termion::cursor::Goto(1, 7), avg_bpm(&bpms))
-                } else {
-                    String::new()
-                };
-                write!(
-                    stdout,
-                    "{}{}Playing: {}{}Space to tap for BPM{}Enter to confirm{}s to skip this song{}r to restart the song{}Esc to quit{}",
-                    termion::clear::All,
-                    termion::cursor::Goto(1, 1),
-                    inputs[input_idx],
-                    termion::cursor::Goto(1, 2),
-                    termion::cursor::Goto(1, 3),
-                    termion::cursor::Goto(1, 4),
-                    termion::cursor::Goto(1, 5),
-                    termion::cursor::Goto(1, 6),
-                    bpm_part,
-                )?;
-                stdout.flush()?;
+                terminal.draw(|f| {
+                    let bpm = if bpms.len() > 0 {
+                        Some(avg_bpm(&bpms))
+                    } else {
+                        None
+                    };
+                    draw_ui(f, &inputs, input_idx, bpm);
+                })?;
 
                 let command = on_keypress([
                     (Key::Char(' '), PlayCommands::Tap),
@@ -243,16 +305,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             State::Finished { input_idx, bpm } => {
-                write!(
-                    stdout,
-                    "{}{}Playing: {}{}Write BPM: {}? (y/n)",
-                    termion::clear::All,
-                    termion::cursor::Goto(1, 1),
-                    inputs[input_idx],
-                    termion::cursor::Goto(1, 2),
-                    bpm,
-                )?;
-                stdout.flush()?;
+                terminal.draw(|f| {
+                    draw_ui(f, &inputs, input_idx, Some(bpm));
+                    let popup = Paragraph::new(vec![
+                        Line::from("Save BPM?"),
+                        Line::from(vec![
+                            Span::styled("y", Style::default().add_modifier(Modifier::BOLD)),
+                            Span::raw("es/"),
+                            Span::styled("n", Style::default().add_modifier(Modifier::BOLD)),
+                            Span::raw("o"),
+                        ]),
+                    ])
+                    .block(Block::default().borders(Borders::ALL))
+                    .alignment(Alignment::Center);
+                    let area = centered_rect(10, 10, f.size());
+                    f.render_widget(Clear, area);
+                    f.render_widget(popup, area);
+                })?;
 
                 let command = on_keypress([
                     (Key::Char('y'), ConfirmCommands::Yes),
@@ -292,6 +361,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::LeaveAlternateScreen
+    )?;
+    terminal.show_cursor()?;
 
     Ok(())
 }

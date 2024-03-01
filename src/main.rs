@@ -208,7 +208,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let f = match Path::new(&input).extension().and_then(OsStr::to_str) {
                 Some("mp3") => Box::new(file::Mp3::new(input)?) as Box<dyn file::Music>,
                 Some("flac") => Box::new(file::Flac::new(input)?) as Box<dyn file::Music>,
-                _ => return Err(anyhow::anyhow!("Unsupported file type")),
+                _ => return Err(anyhow::anyhow!("{}: Unsupported file type", input)),
             };
 
             Ok(f)

@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into_iter()
         .filter(|f| f.bpm().is_none())
         .for_each(|f| {
-            print!("{} ", f.path());
+            println!("{}", f.path());
         });
 
     Ok(())

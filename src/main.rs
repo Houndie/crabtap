@@ -1,8 +1,9 @@
 use clap::Parser;
 use id3::TagLike;
+use std::collections::{hash_map, HashMap};
 use std::fs;
 use std::io::{self, Write};
-use std::process::Stdio;
+use std::process::{Child, Stdio};
 use std::{ffi::OsStr, path::Path, process::Command};
 use termion::{event::Key, input::TermRead, raw::IntoRawMode};
 
@@ -21,16 +22,65 @@ struct Args {
     inputs: Vec<String>,
 }
 
-enum FinishState {
+enum State {
+    Playing {
+        input_idx: usize,
+        player: std::process::Child,
+        last_press_at: Option<chrono::DateTime<chrono::Utc>>,
+        bpms: Vec<f64>,
+    },
+    Finished {
+        input_idx: usize,
+        bpm: u32,
+    },
+}
+
+enum PlayCommands {
     Skip,
     Quit,
     Confirm,
     Restart,
+    Tap,
+}
+
+enum ConfirmCommands {
+    Yes,
+    No,
+}
+
+fn on_keypress<Command>(
+    iter: impl IntoIterator<Item = (Key, Command)>,
+) -> Result<Command, anyhow::Error> {
+    let mut commands = iter.into_iter().collect::<HashMap<Key, Command>>();
+    for key in io::stdin().keys() {
+        let key = key?;
+
+        if let hash_map::Entry::Occupied(entry) = commands.entry(key) {
+            return Ok(entry.remove());
+        }
+    }
+
+    Err(anyhow::anyhow!("No keypress found"))
+}
+
+fn avg_bpm(bpms: &[f64]) -> u32 {
+    (bpms.iter().sum::<f64>() / bpms.len() as f64) as u32
 }
 
 enum Output {
     ToDirectory(String),
     InPlace,
+}
+
+fn play(input: &str) -> Result<Child, anyhow::Error> {
+    Command::new("mpv")
+        .arg(input)
+        .arg("--no-video")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(Into::into)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -94,128 +144,152 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.inputs
     };
 
-    for input in inputs {
-        let mut do_another = true;
-        loop {
-            let mut last_press_at = None;
-            let mut times = Vec::new();
-            let mut child = Command::new("mpv")
-                .arg(input.clone())
-                .arg("--no-video")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()?;
-            let mut stdout = io::stdout().into_raw_mode()?;
-            let instructions = format!(
-                "{}Playing: {}{}Space to tap for BPM{}Enter to confirm{}s to skip this song{}r to restart the song{}Esc to quit{}",
-                termion::cursor::Goto(1, 1),
-                input,
-                termion::cursor::Goto(1, 2),
-                termion::cursor::Goto(1, 3),
-                termion::cursor::Goto(1, 4),
-                termion::cursor::Goto(1, 5),
-                termion::cursor::Goto(1, 6),
-                termion::cursor::Goto(1, 7)
-            );
-            write!(stdout, "{}{}", termion::clear::All, instructions)?;
-            stdout.flush()?;
-            let mut state = FinishState::Quit;
-            for key in io::stdin().keys() {
-                match key? {
-                    Key::Char(' ') => {
+    if inputs.len() == 0 {
+        return Ok(());
+    }
+
+    let mut state = State::Playing {
+        input_idx: 0,
+        player: play(&inputs[0])?,
+        last_press_at: None,
+        bpms: Vec::new(),
+    };
+
+    loop {
+        let mut stdout = io::stdout().into_raw_mode()?;
+        match state {
+            State::Playing {
+                input_idx,
+                mut player,
+                last_press_at,
+                mut bpms,
+            } => {
+                let bpm_part = if bpms.len() > 0 {
+                    format!("{}BPM: {}", termion::cursor::Goto(1, 7), avg_bpm(&bpms))
+                } else {
+                    String::new()
+                };
+                write!(
+                    stdout,
+                    "{}{}Playing: {}{}Space to tap for BPM{}Enter to confirm{}s to skip this song{}r to restart the song{}Esc to quit{}",
+                    termion::clear::All,
+                    termion::cursor::Goto(1, 1),
+                    inputs[input_idx],
+                    termion::cursor::Goto(1, 2),
+                    termion::cursor::Goto(1, 3),
+                    termion::cursor::Goto(1, 4),
+                    termion::cursor::Goto(1, 5),
+                    termion::cursor::Goto(1, 6),
+                    bpm_part,
+                )?;
+                stdout.flush()?;
+
+                let command = on_keypress([
+                    (Key::Char(' '), PlayCommands::Tap),
+                    (Key::Esc, PlayCommands::Quit),
+                    (Key::Char('s'), PlayCommands::Skip),
+                    (Key::Char('r'), PlayCommands::Restart),
+                    (Key::Char('\n'), PlayCommands::Confirm),
+                ])?;
+
+                match command {
+                    PlayCommands::Skip => {
+                        let input_idx = (input_idx + 1) % inputs.len();
+                        player.kill()?;
+                        state = State::Playing {
+                            input_idx,
+                            player: play(&inputs[input_idx])?,
+                            last_press_at: None,
+                            bpms: Vec::new(),
+                        };
+                    }
+                    PlayCommands::Quit => {
+                        player.kill()?;
+                        break;
+                    }
+                    PlayCommands::Confirm => {
+                        player.kill()?;
+                        state = State::Finished {
+                            input_idx,
+                            bpm: avg_bpm(&bpms),
+                        };
+                    }
+                    PlayCommands::Restart => {
+                        player.kill()?;
+                        state = State::Playing {
+                            input_idx,
+                            player: play(&inputs[input_idx])?,
+                            last_press_at: None,
+                            bpms: Vec::new(),
+                        };
+                    }
+                    PlayCommands::Tap => {
                         let now = chrono::Utc::now();
                         if let Some(last_press_at) = last_press_at {
                             let diff: chrono::TimeDelta = now - last_press_at;
                             let bpm = 60000.0 / (diff.num_milliseconds() as f64);
-                            times.push(bpm);
-                            if times.len() > 10 {
-                                times.remove(0);
+                            bpms.push(bpm);
+                            if bpms.len() > 10 {
+                                bpms.remove(0);
                             }
-                            let avg_bpm = (times.iter().sum::<f64>() / times.len() as f64) as u32;
-                            write!(
-                                stdout,
-                                "{}{}BPM: {}",
-                                termion::clear::CurrentLine,
-                                termion::cursor::Goto(1, 7),
-                                avg_bpm
-                            )?;
-                            stdout.flush()?;
                         }
-                        last_press_at = Some(now);
+                        state = State::Playing {
+                            input_idx,
+                            player,
+                            last_press_at: Some(now),
+                            bpms,
+                        }
                     }
-                    Key::Esc => {
-                        state = FinishState::Quit;
-                        break;
-                    }
-                    Key::Char('s') => {
-                        state = FinishState::Skip;
-                        break;
-                    }
-                    Key::Char('r') => {
-                        state = FinishState::Restart;
-                        break;
-                    }
-                    Key::Char('\n') => {
-                        state = FinishState::Confirm;
-                        break;
-                    }
-                    _ => {}
                 }
             }
-            child.kill()?;
-            match state {
-                FinishState::Skip => {
-                    break;
-                }
-                FinishState::Quit => {
-                    do_another = false;
-                    break;
-                }
-                FinishState::Restart => (),
-                FinishState::Confirm => {
-                    let avg_bpm = (times.iter().sum::<f64>() / times.len() as f64) as u32;
-                    write!(
-                        stdout,
-                        "{}Write BPM: {}? (y/n)",
-                        termion::cursor::Goto(1, 8),
-                        avg_bpm,
-                    )?;
-                    stdout.flush()?;
+            State::Finished { input_idx, bpm } => {
+                write!(
+                    stdout,
+                    "{}{}Playing: {}{}Write BPM: {}? (y/n)",
+                    termion::clear::All,
+                    termion::cursor::Goto(1, 1),
+                    inputs[input_idx],
+                    termion::cursor::Goto(1, 2),
+                    bpm,
+                )?;
+                stdout.flush()?;
 
-                    let mut write_file = false;
-                    for key in io::stdin().keys() {
-                        match key? {
-                            Key::Char('y') => {
-                                write_file = true;
-                                break;
-                            }
-                            Key::Char('n') => {
-                                write_file = false;
-                                break;
-                            }
-                            _ => {}
-                        }
-                    }
-                    if write_file {
+                let command = on_keypress([
+                    (Key::Char('y'), ConfirmCommands::Yes),
+                    (Key::Char('n'), ConfirmCommands::No),
+                ])?;
+
+                match command {
+                    ConfirmCommands::Yes => {
                         match output {
                             Output::ToDirectory(ref dir) => {
-                                let new_path =
-                                    Path::new(&dir).join(Path::new(&input).file_name().unwrap());
-                                fs::copy(&input, &new_path)?;
-                                save_tag(new_path.to_str().unwrap(), avg_bpm)?;
+                                let new_path = Path::new(&dir)
+                                    .join(Path::new(&inputs[input_idx]).file_name().unwrap());
+                                fs::copy(&inputs[input_idx], &new_path)?;
+                                save_tag(new_path.to_str().unwrap(), bpm)?;
                             }
                             Output::InPlace => {
-                                save_tag(&input, avg_bpm)?;
+                                save_tag(&inputs[input_idx], bpm)?;
                             }
                         }
-                        break;
-                    };
+                        let input_idx = (input_idx + 1) % inputs.len();
+                        state = State::Playing {
+                            input_idx,
+                            player: play(&inputs[input_idx])?,
+                            last_press_at: None,
+                            bpms: Vec::new(),
+                        };
+                    }
+                    ConfirmCommands::No => {
+                        state = State::Playing {
+                            input_idx,
+                            player: play(&inputs[input_idx])?,
+                            last_press_at: None,
+                            bpms: Vec::new(),
+                        };
+                    }
                 }
             }
-        }
-        if !do_another {
-            break;
         }
     }
 

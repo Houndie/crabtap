@@ -41,7 +41,7 @@ enum State {
         input_idx: usize,
         player: std::process::Child,
         last_press_at: Option<chrono::DateTime<chrono::Utc>>,
-        bpms: Vec<f64>,
+        bpms: Bpms,
     },
     Finished {
         input_idx: usize,
@@ -129,8 +129,36 @@ fn on_keypress<Command>(
     }
 }
 
-fn avg_bpm(bpms: &[f64]) -> u32 {
-    (bpms.iter().sum::<f64>() / bpms.len() as f64) as u32
+struct Bpms {
+    bpms: [f64; 10],
+    next: usize,
+    size: usize,
+}
+
+impl Bpms {
+    fn new() -> Bpms {
+        Bpms {
+            bpms: [0.0; 10],
+            next: 0,
+            size: 0,
+        }
+    }
+
+    fn push(&mut self, bpm: f64) {
+        self.bpms[self.next] = bpm;
+        self.next = (self.next + 1) % 10;
+        if self.size < 10 {
+            self.size += 1;
+        }
+    }
+
+    fn avg(&self) -> Option<u32> {
+        if self.size == 0 {
+            None
+        } else {
+            Some((self.bpms.iter().take(self.size).sum::<f64>() / self.size as f64) as u32)
+        }
+    }
 }
 
 enum Output {
@@ -256,7 +284,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         input_idx: 0,
         player: play(&inputs[0])?,
         last_press_at: None,
-        bpms: Vec::new(),
+        bpms: Bpms::new(),
     };
 
     let mut terminal = RAIITerminal::new()?;
@@ -270,12 +298,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mut bpms,
             } => {
                 terminal.draw(|f| {
-                    let bpm = if bpms.len() > 0 {
-                        Some(avg_bpm(&bpms))
-                    } else {
-                        None
-                    };
-                    draw_ui(f, &inputs, input_idx, bpm);
+                    draw_ui(f, &inputs, input_idx, bpms.avg());
                 })?;
 
                 let command = on_keypress([
@@ -309,27 +332,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             input_idx,
                             player: play(&inputs[input_idx])?,
                             last_press_at: None,
-                            bpms: Vec::new(),
+                            bpms: Bpms::new(),
                         };
                     }
                     PlayCommands::Quit => {
                         player.kill()?;
                         break;
                     }
-                    PlayCommands::Confirm => {
-                        player.kill()?;
-                        state = State::Finished {
-                            input_idx,
-                            bpm: avg_bpm(&bpms),
-                        };
-                    }
+                    PlayCommands::Confirm => match bpms.avg() {
+                        Some(bpm) => {
+                            player.kill()?;
+                            state = State::Finished { input_idx, bpm };
+                        }
+                        None => {
+                            state = State::Playing {
+                                input_idx,
+                                player,
+                                last_press_at,
+                                bpms,
+                            }
+                        }
+                    },
                     PlayCommands::Restart => {
                         player.kill()?;
                         state = State::Playing {
                             input_idx,
                             player: play(&inputs[input_idx])?,
                             last_press_at: None,
-                            bpms: Vec::new(),
+                            bpms: Bpms::new(),
                         };
                     }
                     PlayCommands::Tap => {
@@ -338,9 +368,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let diff: chrono::TimeDelta = now - last_press_at;
                             let bpm = 60000.0 / (diff.num_milliseconds() as f64);
                             bpms.push(bpm);
-                            if bpms.len() > 10 {
-                                bpms.remove(0);
-                            }
                         }
                         state = State::Playing {
                             input_idx,

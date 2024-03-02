@@ -22,10 +22,16 @@ use std::{
 
 mod file;
 
+/// A tui for generating tap BPMs in rust
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
+    /// Any flac or mp3 file
     inputs: Vec<String>,
+
+    /// Confirm the BPM before saving
+    #[clap(short, long)]
+    confirm: bool,
 }
 
 enum State {
@@ -279,7 +285,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     PlayCommands::Confirm => match bpms.avg() {
                         Some(bpm) => {
-                            state = State::Finished { bpm };
+                            if args.confirm {
+                                state = State::Finished { bpm };
+                            } else {
+                                inputs[table_state.selected().unwrap()].set_bpm(bpm)?;
+                                let input_idx =
+                                    (table_state.selected().unwrap() + 1) % inputs.len();
+                                table_state.select(Some(input_idx));
+                                _player = audio_stream.play(&inputs[input_idx].path())?;
+                                last_press_at = None;
+                                bpms = Bpms::new();
+                            }
                         }
                         None => {}
                     },

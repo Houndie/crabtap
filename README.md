@@ -15,11 +15,11 @@ crabtap song1.mp3 song2.flac
 
 ## Controls
 
-**Space**: Tap to generate BPM data.
-**Enter**: Write BPM data to file (with confirmation prompt).
-**Up/K/Down/J**: Change songs.
-**R**: Restart current song
-**Esc/Q**: Quit
+* **Space**: Tap to generate BPM data.
+* **Enter**: Write BPM data to file (with confirmation prompt).
+* **Up/K/Down/J**: Change songs.
+* **R**: Restart current song
+* **Esc/Q**: Quit
 
 ## Crabtapfilter
 

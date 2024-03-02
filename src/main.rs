@@ -14,7 +14,6 @@ use ratatui::{
 };
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
 use std::{
-    collections::{hash_map, HashMap},
     ffi::OsStr,
     fs::File,
     io::{self, BufReader},
@@ -41,6 +40,34 @@ enum PlayCommands {
     Tap,
     Up,
     Down,
+}
+
+fn play_keys(key: KeyEvent) -> Option<PlayCommands> {
+    if key.modifiers != KeyModifiers::empty() {
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Char(' ') => Some(PlayCommands::Tap),
+        KeyCode::Esc | KeyCode::Char('q') => Some(PlayCommands::Quit),
+        KeyCode::Char('r') => Some(PlayCommands::Restart),
+        KeyCode::Enter => Some(PlayCommands::Confirm),
+        KeyCode::Up | KeyCode::Char('k') => Some(PlayCommands::Up),
+        KeyCode::Down | KeyCode::Char('j') => Some(PlayCommands::Down),
+        _ => None,
+    }
+}
+
+fn confirm_keys(key: KeyEvent) -> Option<ConfirmCommands> {
+    if key.modifiers != KeyModifiers::empty() {
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Char('y') => Some(ConfirmCommands::Yes),
+        KeyCode::Char('n') => Some(ConfirmCommands::No),
+        _ => None,
+    }
 }
 
 enum ConfirmCommands {
@@ -99,18 +126,15 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     .split(popup_layout[1])[1]
 }
 
-fn on_keypress<Command>(
-    iter: impl IntoIterator<Item = (KeyEvent, Command)>,
+fn on_keypress<Command, F: Fn(KeyEvent) -> Option<Command>>(
+    keys: F,
 ) -> Result<Command, anyhow::Error> {
-    let mut commands = iter
-        .into_iter()
-        .map(|(k, v)| (Event::Key(k), v))
-        .collect::<HashMap<Event, Command>>();
     loop {
         let key = crossterm::event::read()?;
-
-        if let hash_map::Entry::Occupied(entry) = commands.entry(key) {
-            return Ok(entry.remove());
+        if let Event::Key(key) = key {
+            if let Some(command) = keys(key) {
+                return Ok(command);
+            }
         }
     }
 }
@@ -147,12 +171,22 @@ impl Bpms {
     }
 }
 
-fn play(input: &str, handle: &OutputStreamHandle) -> Result<Sink, anyhow::Error> {
-    let sink = Sink::try_new(handle)?;
-    let source = Decoder::new_looped(BufReader::new(File::open(input)?))?;
-    sink.append(source);
-    sink.play();
-    Ok(sink)
+struct AudioStream<'a> {
+    handle: &'a OutputStreamHandle,
+}
+
+impl<'a> AudioStream<'a> {
+    fn new(handle: &'a OutputStreamHandle) -> AudioStream<'a> {
+        AudioStream { handle }
+    }
+
+    fn play(&'a self, input: &str) -> Result<Sink, anyhow::Error> {
+        let sink = Sink::try_new(self.handle)?;
+        let source = Decoder::new_looped(BufReader::new(File::open(input)?))?;
+        sink.append(source);
+        sink.play();
+        Ok(sink)
+    }
 }
 
 fn draw_ui(
@@ -200,6 +234,8 @@ fn draw_ui(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (_stream, stream_handle) = OutputStream::try_default()?;
+    let audio_stream = AudioStream::new(&stream_handle);
+
     let args = Args::parse();
     let mut inputs = args
         .inputs
@@ -220,7 +256,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut table_state = TableState::default();
     table_state.select(Some(0));
-    let mut _player = play(&inputs[0].path(), &stream_handle)?;
+    let mut _player = audio_stream.play(&inputs[0].path())?;
     let mut last_press_at = None;
     let mut bpms = Bpms::new();
 
@@ -235,44 +271,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     draw_ui(f, &inputs, &mut table_state, bpms.avg());
                 })?;
 
-                let command = on_keypress([
-                    (
-                        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()),
-                        PlayCommands::Tap,
-                    ),
-                    (
-                        KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
-                        PlayCommands::Quit,
-                    ),
-                    (
-                        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()),
-                        PlayCommands::Quit,
-                    ),
-                    (
-                        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()),
-                        PlayCommands::Restart,
-                    ),
-                    (
-                        KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
-                        PlayCommands::Confirm,
-                    ),
-                    (
-                        KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
-                        PlayCommands::Up,
-                    ),
-                    (
-                        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()),
-                        PlayCommands::Up,
-                    ),
-                    (
-                        KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
-                        PlayCommands::Down,
-                    ),
-                    (
-                        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()),
-                        PlayCommands::Down,
-                    ),
-                ])?;
+                let command = on_keypress(play_keys)?;
 
                 match command {
                     PlayCommands::Quit => {
@@ -285,10 +284,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         None => {}
                     },
                     PlayCommands::Restart => {
-                        _player = play(
-                            &inputs[table_state.selected().unwrap()].path(),
-                            &stream_handle,
-                        )?;
+                        _player =
+                            audio_stream.play(&inputs[table_state.selected().unwrap()].path())?;
                         last_press_at = None;
                         bpms = Bpms::new();
                     }
@@ -309,7 +306,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let input_idx =
                             (table_state.selected().unwrap() + inputs.len() - 1) % inputs.len();
                         table_state.select(Some(input_idx));
-                        _player = play(&inputs[input_idx].path(), &stream_handle)?;
+                        _player = audio_stream.play(&inputs[input_idx].path())?;
                         last_press_at = None;
                         bpms = Bpms::new();
                     }
@@ -320,7 +317,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         let input_idx = (table_state.selected().unwrap() + 1) % inputs.len();
                         table_state.select(Some(input_idx));
-                        _player = play(&inputs[input_idx].path(), &stream_handle)?;
+                        _player = audio_stream.play(&inputs[input_idx].path())?;
                         last_press_at = None;
                         bpms = Bpms::new();
                     }
@@ -345,16 +342,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     f.render_widget(popup, area);
                 })?;
 
-                let command = on_keypress([
-                    (
-                        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()),
-                        ConfirmCommands::Yes,
-                    ),
-                    (
-                        KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()),
-                        ConfirmCommands::No,
-                    ),
-                ])?;
+                let command = on_keypress(confirm_keys)?;
 
                 match command {
                     ConfirmCommands::Yes => {
@@ -362,7 +350,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let input_idx = (table_state.selected().unwrap() + 1) % inputs.len();
                         state = State::Playing;
                         table_state.select(Some(input_idx));
-                        _player = play(&inputs[input_idx].path(), &stream_handle)?;
+                        _player = audio_stream.play(&inputs[input_idx].path())?;
                         last_press_at = None;
                         bpms = Bpms::new();
                     }

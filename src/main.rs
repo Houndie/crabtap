@@ -17,6 +17,7 @@ use std::{
     ffi::OsStr,
     fs::File,
     io::{self, BufReader},
+    iter,
     path::Path,
 };
 
@@ -32,6 +33,14 @@ struct Args {
     /// Confirm the BPM before saving
     #[clap(short, long)]
     confirm: bool,
+
+    /// The maximum time between taps to consider a new BPM in seconds
+    #[clap(long, default_value = "5")]
+    max_time: u32,
+
+    /// The number of bpms to average
+    #[clap(long, default_value = "10")]
+    num_avg: usize,
 }
 
 enum State {
@@ -149,15 +158,15 @@ fn on_keypress<Command, F: Fn(KeyEvent) -> Option<Command>>(
 }
 
 struct Bpms {
-    bpms: [f64; 10],
+    bpms: Box<[f64]>,
     next: usize,
     size: usize,
 }
 
 impl Bpms {
-    fn new() -> Bpms {
+    fn new(num_bpms: usize) -> Bpms {
         Bpms {
-            bpms: [0.0; 10],
+            bpms: iter::repeat(0.0).take(num_bpms).collect(),
             next: 0,
             size: 0,
         }
@@ -165,8 +174,8 @@ impl Bpms {
 
     fn push(&mut self, bpm: f64) {
         self.bpms[self.next] = bpm;
-        self.next = (self.next + 1) % 10;
-        if self.size < 10 {
+        self.next = (self.next + 1) % self.bpms.len();
+        if self.size < self.bpms.len() {
             self.size += 1;
         }
     }
@@ -267,7 +276,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     table_state.select(Some(0));
     let mut _player = audio_stream.play(&inputs[0].path())?;
     let mut last_press_at = None;
-    let mut bpms = Bpms::new();
+    let mut bpms = Bpms::new(args.num_avg);
 
     let mut state = State::Playing;
 
@@ -297,7 +306,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 table_state.select(Some(input_idx));
                                 _player = audio_stream.play(&inputs[input_idx].path())?;
                                 last_press_at = None;
-                                bpms = Bpms::new();
+                                bpms = Bpms::new(args.num_avg);
                             }
                         }
                         None => {}
@@ -306,14 +315,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         _player =
                             audio_stream.play(&inputs[table_state.selected().unwrap()].path())?;
                         last_press_at = None;
-                        bpms = Bpms::new();
+                        bpms = Bpms::new(args.num_avg);
                     }
                     PlayCommands::Tap => {
                         let now = chrono::Utc::now();
                         if let Some(last_press_at) = last_press_at {
                             let diff: chrono::TimeDelta = now - last_press_at;
-                            let bpm = 60000.0 / (diff.num_milliseconds() as f64);
-                            bpms.push(bpm);
+                            if diff.num_seconds() < args.max_time.into() {
+                                let bpm = 60000.0 / (diff.num_milliseconds() as f64);
+                                bpms.push(bpm);
+                            }
                         }
                         last_press_at = Some(now);
                     }
@@ -327,7 +338,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         table_state.select(Some(input_idx));
                         _player = audio_stream.play(&inputs[input_idx].path())?;
                         last_press_at = None;
-                        bpms = Bpms::new();
+                        bpms = Bpms::new(args.num_avg);
                     }
                     PlayCommands::Down => {
                         if inputs.len() == 1 {
@@ -338,7 +349,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         table_state.select(Some(input_idx));
                         _player = audio_stream.play(&inputs[input_idx].path())?;
                         last_press_at = None;
-                        bpms = Bpms::new();
+                        bpms = Bpms::new(args.num_avg);
                     }
 
                     PlayCommands::Manual => {
@@ -375,7 +386,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         table_state.select(Some(input_idx));
                         _player = audio_stream.play(&inputs[input_idx].path())?;
                         last_press_at = None;
-                        bpms = Bpms::new();
+                        bpms = Bpms::new(args.num_avg);
                     }
                     ConfirmCommands::No => {
                         state = State::Playing;
@@ -424,7 +435,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             table_state.select(Some(input_idx));
                             _player = audio_stream.play(&inputs[input_idx].path())?;
                             last_press_at = None;
-                            bpms = Bpms::new();
+                            bpms = Bpms::new(args.num_avg);
                             break;
                         }
                         KeyCode::Backspace => manual_bpm / 10,

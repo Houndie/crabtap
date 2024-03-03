@@ -19,6 +19,7 @@ crabtap song1.mp3 song2.flac
 * **Enter**: Write BPM data to file (with confirmation prompt).
 * **Up/K/Down/J**: Change songs.
 * **R**: Restart current song
+* **M**: To manually input a bpm
 * **Esc/Q**: Quit
 
 ## Crabtapfilter

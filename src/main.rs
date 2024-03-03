@@ -37,6 +37,7 @@ struct Args {
 enum State {
     Playing,
     Finished { bpm: u32 },
+    Manual { manual_bpm: u32 },
 }
 
 enum PlayCommands {
@@ -46,6 +47,7 @@ enum PlayCommands {
     Tap,
     Up,
     Down,
+    Manual,
 }
 
 fn play_keys(key: KeyEvent) -> Option<PlayCommands> {
@@ -60,6 +62,7 @@ fn play_keys(key: KeyEvent) -> Option<PlayCommands> {
         KeyCode::Enter => Some(PlayCommands::Confirm),
         KeyCode::Up | KeyCode::Char('k') => Some(PlayCommands::Up),
         KeyCode::Down | KeyCode::Char('j') => Some(PlayCommands::Down),
+        KeyCode::Char('m') => Some(PlayCommands::Manual),
         _ => None,
     }
 }
@@ -337,6 +340,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         last_press_at = None;
                         bpms = Bpms::new();
                     }
+
+                    PlayCommands::Manual => {
+                        state = State::Manual { manual_bpm: 0 };
+                    }
                 }
             }
             State::Finished { bpm } => {
@@ -373,6 +380,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ConfirmCommands::No => {
                         state = State::Playing;
                     }
+                }
+            }
+            State::Manual { manual_bpm } => {
+                terminal.draw(|f| {
+                    draw_ui(f, &inputs, &mut table_state, bpms.avg());
+                    let manual_bpm_str = if manual_bpm > 0 {
+                        manual_bpm.to_string()
+                    } else {
+                        String::new()
+                    };
+                    let popup = Paragraph::new(manual_bpm_str).block(
+                        Block::default()
+                            .title("Manually enter bpm")
+                            .borders(Borders::ALL),
+                    );
+                    let area = centered_rect(30, 5, f.size());
+                    f.render_widget(Clear, area);
+                    f.render_widget(popup, area);
+                })?;
+
+                loop {
+                    let key = crossterm::event::read()?;
+
+                    let key_event = match key {
+                        Event::Key(key) => key,
+                        _ => continue,
+                    };
+
+                    if key_event.modifiers != KeyModifiers::empty() {
+                        continue;
+                    }
+
+                    let new_bpm = match key_event.code {
+                        KeyCode::Esc | KeyCode::Char('m') => {
+                            state = State::Playing;
+                            break;
+                        }
+                        KeyCode::Enter => {
+                            inputs[table_state.selected().unwrap()].set_bpm(manual_bpm)?;
+                            let input_idx = (table_state.selected().unwrap() + 1) % inputs.len();
+                            state = State::Playing;
+                            table_state.select(Some(input_idx));
+                            _player = audio_stream.play(&inputs[input_idx].path())?;
+                            last_press_at = None;
+                            bpms = Bpms::new();
+                            break;
+                        }
+                        KeyCode::Backspace => manual_bpm / 10,
+                        KeyCode::Char(c) => {
+                            if let Some(digit) = c.to_digit(10) {
+                                if manual_bpm > u32::MAX / 10 {
+                                    manual_bpm
+                                } else {
+                                    manual_bpm * 10 + digit
+                                }
+                            } else {
+                                manual_bpm
+                            }
+                        }
+                        _ => manual_bpm,
+                    };
+
+                    state = State::Manual {
+                        manual_bpm: new_bpm,
+                    };
+
+                    break;
                 }
             }
         }

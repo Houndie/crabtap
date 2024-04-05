@@ -43,7 +43,16 @@ impl Music for Mp3 {
 
     fn set_bpm(&mut self, bpm: u32) -> Result<(), anyhow::Error> {
         self.bpm = Some(bpm);
-        let mut tag = id3::Tag::read_from_path(&self.path).map_err(Into::<anyhow::Error>::into)?;
+        let mut tag = match id3::Tag::read_from_path(&self.path) {
+            Ok(tag) => tag,
+            Err(id3::Error {
+                kind: id3::ErrorKind::NoTag,
+                ..
+            }) => id3::Tag::default(),
+            Err(e) => {
+                return Err(e.into());
+            }
+        };
         tag.set_text("TBPM", bpm.to_string());
         tag.write_to_path(&self.path, id3::Version::Id3v24)
             .map_err(Into::<anyhow::Error>::into)?;

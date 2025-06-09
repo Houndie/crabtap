@@ -2,48 +2,65 @@
   description = "A very basic flake";
 
   inputs = {
-    nixpkgs.url = "nixpkgs/nixos-23.11";
+    unstable.url = "nixpkgs/nixos-unstable";
     rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, rust-overlay, flake-utils }: 
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      unstable,
+      rust-overlay,
+      flake-utils,
+      ...
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
-        pkgs = import nixpkgs {
+        pkgs = import unstable {
           inherit system;
           overlays = [ (import rust-overlay) ];
         };
 
-        nativeDeps = with pkgs; [ pkg-config ];
-        deps = with pkgs; [ alsa-lib ];
+        nativeDeps = pkgs: [
+          pkgs.pkg-config
+        ];
 
-        rustPlatform = pkgs.makeRustPlatform {
-          cargo = pkgs.rust-bin.stable.latest.default;
-          rustc = pkgs.rust-bin.stable.latest.default;
-        };
+        deps = pkgs: [
+          pkgs.alsa-lib
+        ];
 
-      in
-      {
-        packages = {
-          default = rustPlatform.buildRustPackage {
+        mkCrabTap =
+          pkgs:
+          let
+            rustPlatform = pkgs.makeRustPlatform {
+              cargo = pkgs.rust-bin.stable.latest.default;
+              rustc = pkgs.rust-bin.stable.latest.default;
+            };
+          in
+          rustPlatform.buildRustPackage {
             pname = "crabtap";
             version = "0.1";
             src = ./.;
 
-            nativeBuildInputs = nativeDeps;
-            buildInputs = deps;
+            nativeBuildInputs = nativeDeps pkgs;
+            buildInputs = deps pkgs;
 
             cargoLock = {
               lockFile = ./Cargo.lock;
             };
           };
+      in
+      {
+        packages.default = mkCrabTap pkgs;
+        overlays.default = final: prev: {
+          crabtap = mkCrabTap prev.pkgs;
         };
 
         devShell = pkgs.mkShell {
-          nativeBuildInputs = nativeDeps;
-          buildInputs = deps;
-          packages = with pkgs; [
+          nativeBuildInputs = nativeDeps pkgs;
+          buildInputs = deps pkgs;
+          packages = [
             pkgs.rust-bin.stable.latest.default
           ];
         };

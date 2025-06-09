@@ -2,14 +2,14 @@
   description = "A very basic flake";
 
   inputs = {
-    unstable.url = "nixpkgs/nixos-unstable";
+    nixpkgs.url = "nixpkgs/nixos-unstable";
     rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
   outputs =
     {
-      unstable,
+      nixpkgs,
       rust-overlay,
       flake-utils,
       ...
@@ -47,7 +47,7 @@
       systemOutputs = flake-utils.lib.eachDefaultSystem (
         system:
         let
-          pkgs = import unstable {
+          pkgs = import nixpkgs {
             inherit system;
             overlays = [ (import rust-overlay) ];
           };

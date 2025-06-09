@@ -68,8 +68,13 @@
     in
     systemOutputs
     // {
-      overlays.default = final: prev: {
-        crabtap = mkCrabTap prev.pkgs;
-      };
+      overlays.default =
+        final: prev:
+        let
+          pkgs = (import rust-overlay) final prev;
+        in
+        {
+          crabtap = mkCrabTap pkgs;
+        };
     };
 }

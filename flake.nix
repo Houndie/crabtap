@@ -71,7 +71,7 @@
       overlays.default =
         final: prev:
         let
-          pkgs = (import rust-overlay) final prev;
+          pkgs = rust-overlay.overlays.default final prev;
         in
         {
           crabtap = mkCrabTap pkgs;

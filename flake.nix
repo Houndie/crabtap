@@ -2,79 +2,58 @@
   description = "A very basic flake";
 
   inputs = {
-    nixpkgs.url = "nixpkgs/nixos-unstable";
+    nixpkgs.url = "nixpkgs/nixpkgs-unstable";
     rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
   outputs =
     {
+      self,
       nixpkgs,
       rust-overlay,
       flake-utils,
-      ...
     }:
-    let
-      nativeDeps = pkgs: [
-        pkgs.pkg-config
-      ];
+    flake-utils.lib.eachDefaultSystem (
+      system:
+      let
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [ (import rust-overlay) ];
+        };
 
-      deps = pkgs: [
-        pkgs.alsa-lib
-      ];
+        nativeDeps = with pkgs; [ pkg-config ];
+        deps = with pkgs; [ alsa-lib ];
 
-      mkCrabTap =
-        pkgs:
-        let
-          rustPlatform = pkgs.makeRustPlatform {
-            cargo = pkgs.rust-bin.stable.latest.default;
-            rustc = pkgs.rust-bin.stable.latest.default;
-          };
-        in
-        rustPlatform.buildRustPackage {
-          pname = "crabtap";
-          version = "0.1";
-          src = ./.;
+        rustPlatform = pkgs.makeRustPlatform {
+          cargo = pkgs.rust-bin.stable.latest.default;
+          rustc = pkgs.rust-bin.stable.latest.default;
+        };
 
-          nativeBuildInputs = nativeDeps pkgs;
-          buildInputs = deps pkgs;
+      in
+      {
+        packages = {
+          default = rustPlatform.buildRustPackage {
+            pname = "crabtap";
+            version = "0.1";
+            src = ./.;
 
-          cargoLock = {
-            lockFile = ./Cargo.lock;
+            nativeBuildInputs = nativeDeps;
+            buildInputs = deps;
+
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+            };
           };
         };
 
-      systemOutputs = flake-utils.lib.eachDefaultSystem (
-        system:
-        let
-          pkgs = import nixpkgs {
-            inherit system;
-            overlays = [ (import rust-overlay) ];
-          };
-
-        in
-        {
-          packages.default = mkCrabTap pkgs;
-
-          devShell = pkgs.mkShell {
-            nativeBuildInputs = nativeDeps pkgs;
-            buildInputs = deps pkgs;
-            packages = [
-              pkgs.rust-bin.stable.latest.default
-            ];
-          };
-        }
-      );
-    in
-    systemOutputs
-    // {
-      overlays.default =
-        final: prev:
-        let
-          pkgs = (rust-overlay.overlays.default final prev) // prev;
-        in
-        {
-          crabtap = mkCrabTap pkgs;
+        devShell = pkgs.mkShell {
+          nativeBuildInputs = nativeDeps;
+          buildInputs = deps;
+          packages = with pkgs; [
+            pkgs.rust-bin.stable.latest.default
+          ];
         };
-    };
+      }
+    );
 }
